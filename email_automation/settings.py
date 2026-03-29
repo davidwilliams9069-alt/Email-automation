@@ -12,60 +12,93 @@ https://docs.djangoproject.com/en/4.0/ref/settings/
 import os
 import json
 import base64
-import environ
 import dj_database_url
 from pathlib import Path
 from email.headerregistry import Address
 from logging.handlers import SysLogHandler
 
-from google.oauth2 import service_account
-
-
-env = environ.Env()
-environ.Env.read_env()
+# Load environment variables from .env file if it exists (local development)
+from dotenv import load_dotenv
+load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = bool(int(env('DEBUG')))
+DEBUG = os.environ.get('DEBUG', '0') == '1'
 
-cloud_platform = os.environ.setdefault('CLOUD_PLATFORM', '')
+# Check if running on Vercel
+IS_VERCEL = os.environ.get('VERCEL', '') == '1'
+cloud_platform = os.environ.get('CLOUD_PLATFORM', '')
 
-if cloud_platform in ['DIGITAL_OCEAN', 'VERCEL']:
-    # since the firebase_cred cannot be uploaded manually 
-    # https://www.digitalocean.com/community/questions/how-to-upload-a-secret-credential-file
-    firebase_cred = env('FIREBASE_ENCODED')
-    decoded_bytes = base64.b64decode(firebase_cred)
-    decoded_json = json.loads(decoded_bytes.decode('utf-8'))
-  
-    with open(env('FIREBASE_CRED_PATH'), 'w') as f:
-        json.dump(decoded_json, f, indent=4)
+# Firebase credentials handling for cloud platforms
+if cloud_platform in ['DIGITAL_OCEAN', 'VERCEL'] or IS_VERCEL:
+    firebase_cred = os.environ.get('FIREBASE_ENCODED', '')
+    firebase_cred_path = os.environ.get('FIREBASE_CRED_PATH', '/tmp/firebase_cred.json')
+    
+    if firebase_cred:
+        try:
+            decoded_bytes = base64.b64decode(firebase_cred)
+            decoded_json = json.loads(decoded_bytes.decode('utf-8'))
+            
+            # Write to /tmp on Vercel (read-only filesystem except /tmp)
+            with open(firebase_cred_path, 'w') as f:
+                json.dump(decoded_json, f, indent=4)
+        except Exception as e:
+            print(f"Warning: Could not decode Firebase credentials: {e}")
 
 
 # SECURITY WARNING: keep the secret key used in production secret!
+SECRET_KEY = os.environ.get(
+    'SECRET_KEY', 
+    'django-insecure-ksg!i&r49#t+x6*f^v#glkvhg_nfb^24r%l7im#ti-(it!5(y6' if DEBUG else None
+)
+
+if not SECRET_KEY and not DEBUG:
+    raise ValueError("SECRET_KEY environment variable is required in production")
+
+# Allowed hosts configuration
 if DEBUG:
-    SECRET_KEY = env.get_value('SECRET_KEY', default='django-insecure-ksg!i&r49#t+x6*f^v#glkvhg_nfb^24r%l7im#ti-(it!5(y6')
-
+    ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+elif IS_VERCEL:
+    # Allow all Vercel deployment domains and custom domains
+    ALLOWED_HOSTS = [
+        '.vercel.app',
+        '.now.sh',
+        'localhost',
+    ]
+    # Add custom domain if specified
+    custom_domain = os.environ.get('DOMAIN', '')
+    if custom_domain:
+        # Extract hostname from domain URL
+        from urllib.parse import urlparse
+        parsed = urlparse(custom_domain)
+        hostname = parsed.netloc or parsed.path
+        if hostname:
+            ALLOWED_HOSTS.append(hostname)
+    
+    # Add additional allowed hosts from env
+    additional_hosts = os.environ.get('ALLOWED_PROD_HOSTS', '')
+    if additional_hosts:
+        ALLOWED_HOSTS.extend([h.strip() for h in additional_hosts.split(',') if h.strip()])
 else:
-    SECRET_KEY = env.get_value('PORD_SECRET_KEY')
+    ALLOWED_HOSTS = os.environ.get('ALLOWED_PROD_HOSTS', '').replace(' ', '').split(',')
 
-if DEBUG:
-    ALLOWED_HOSTS = []
+# CSRF trusted origins for Vercel
+CSRF_TRUSTED_ORIGINS = []
+if IS_VERCEL:
+    CSRF_TRUSTED_ORIGINS = [
+        'https://*.vercel.app',
+        'https://*.now.sh',
+    ]
+    custom_domain = os.environ.get('DOMAIN', '')
+    if custom_domain:
+        CSRF_TRUSTED_ORIGINS.append(custom_domain)
 
-else:
-    ALLOWED_HOSTS = env('ALLOWED_PROD_HOSTS').replace(' ', '').split(',')
-
-
-if DEBUG:
-    DOMAIN = 'http://localhost:8000'
-
-else:
-    DOMAIN = env('DOMAIN')
+DOMAIN = os.environ.get('DOMAIN', 'http://localhost:8000')
 
 # Application definition
-
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -74,30 +107,29 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     
-    #3rd party
+    # 3rd party
     'encrypted_model_fields',
     'tailwind',
     'theme',
     'corsheaders',
+    # Note: django_celery_beat requires database access, may need to be conditionally loaded
     'django_celery_beat',
-    'django_browser_reload',
 
     # my apps
     'automail',
     'user',
-    # 'terms',
     'blog'
-
 ]
 
+# Only add browser reload in development
 if DEBUG:
-    FIELD_ENCRYPTION_KEY = env.get_value('FIELD_ENCRYPTION_KEY')
+    INSTALLED_APPS.append('django_browser_reload')
 
-else:
-    FIELD_ENCRYPTION_KEY = env.get_value('PROD_FIELD_ENCRYPTION_KEY')
-
-# # Decode the base64-encoded string to bytes with UTF-8 encoding
-# FIELD_ENCRYPTION_KEY = base64.b64decode(FIELD_ENCRYPTION_KEY_str)
+# Field encryption key
+FIELD_ENCRYPTION_KEY = os.environ.get(
+    'FIELD_ENCRYPTION_KEY' if DEBUG else 'PROD_FIELD_ENCRYPTION_KEY',
+    os.environ.get('FERNET_KEY', '')  # Fallback to FERNET_KEY
+)
 
 LOGIN_URL = '/user/login/'
 
@@ -111,12 +143,8 @@ INTERNAL_IPS = [
     "127.0.0.1",
 ]
 
-if DEBUG:
-    CELERY_BROKER_URL = 'redis://127.0.0.1:6379'
-
-else: 
-    CELERY_BROKER_URL = env('REDIS_PROD_HOST').strip()
-
+# Celery configuration
+CELERY_BROKER_URL = os.environ.get('REDIS_PROD_HOST', 'redis://127.0.0.1:6379').strip()
 
 CELERY_ACCEPT_CONTENT = ['application/json']
 CELERY_RESULT_SERIALIZER = 'json'
@@ -127,43 +155,35 @@ CELERY_IMPORTS = ['utils.tasks',]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
-    'whitenoise.middleware.WhiteNoiseMiddleware', #whitenoise
+    'whitenoise.middleware.WhiteNoiseMiddleware',  # WhiteNoise for static files
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'corsheaders.middleware.CorsMiddleware',  # CORS
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-
-    "django_browser_reload.middleware.BrowserReloadMiddleware", # reload
-    
     'django_ratelimit.middleware.RatelimitMiddleware',
     'email_automation.middlewares.RateLimitJsonResponseMiddleware',
-    # 'email_automation.middlewares.TimezoneMiddleware',
-
     'email_automation.middlewares.FileUploadMiddleware',
-
 ]
+
+# Add browser reload middleware only in development
+if DEBUG:
+    MIDDLEWARE.append("django_browser_reload.middleware.BrowserReloadMiddleware")
 
 ROOT_URLCONF = 'email_automation.urls'
 
-
+# Email configuration
 if DEBUG:
-    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend' # This is only for development
-    # EMAIL_BACKEND = 'django.core.mail.backends.dummy.EmailBackend'
-   
+    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 else:
-    EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend' # for production
-
-    EMAIL_HOST = env('EMAIL_HOST')
-    EMAIL_PORT = 465
-
-    EMAIL_HOST_USER = env('EMAIL_HOST_USER')
-    EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD')
-
+    EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+    EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
+    EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '465'))
+    EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
+    EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
     DEFAULT_FROM_EMAIL = Address(display_name="AtMailWin", addr_spec=EMAIL_HOST_USER)
-
-    # EMAIL_USE_TLS = True
     EMAIL_USE_SSL = True
 
 EMAIL_FROM_SIGNATURE = 'Best regards, Atmailwin Team'
@@ -175,7 +195,7 @@ TEMPLATES = [
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
         'DIRS': [
             BASE_DIR.joinpath("templates"),
-            BASE_DIR.joinpath("templates", "html", ),
+            BASE_DIR.joinpath("templates", "html"),
             BASE_DIR.joinpath("templates", "html", "error"),
             BASE_DIR.joinpath("templates", "html", "authentication"),
             BASE_DIR.joinpath("templates", "html", "terms"),
@@ -192,13 +212,10 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
-               
                 'email_automation.context_processors.secrets',
-                
             ],
-        'libraries':{
-            'custom_tags': 'email_automation.templatetags.custom_tags',
-            
+            'libraries': {
+                'custom_tags': 'email_automation.templatetags.custom_tags',
             }
         },
     },
@@ -207,10 +224,11 @@ TEMPLATES = [
 WSGI_APPLICATION = 'email_automation.wsgi.application'
 
 
-# Database
+# Database configuration
 # https://docs.djangoproject.com/en/4.0/ref/settings/#databases
 
-if DEBUG:
+if DEBUG and not os.environ.get('DATABASE_URL') and not os.environ.get('POSTGRES_URL'):
+    # Local SQLite for development
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
@@ -220,131 +238,119 @@ if DEBUG:
             "timeout": 20,
         }
     }
-
 else:
-    # DATABASES = {
-    #         'default': {
-    #             'ENGINE': 'django.db.backends.postgresql_psycopg2',
-    #             'NAME': env.get_value('POSTGRES_DATABASE'), # use env file
-    #             'USER': env.get_value('POSTGRES_USER'),
-    #             # 'PASSWORD': os.environ.get('PROD_DB_PASSWORD'),
-    #             'PASSWORD': env.get_value('POSTGRES_PASSWORD'),
-    #             'HOST': env.get_value('POSTGRES_HOST'),
-    #             'PORT': '5432',
-    #     }
-    # }
+    # Production PostgreSQL via dj-database-url
+    # Supports DATABASE_URL, POSTGRES_URL, or Neon/Supabase URLs
+    database_url = os.environ.get('DATABASE_URL') or os.environ.get('POSTGRES_URL', '')
+    
+    if database_url:
+        DATABASES = {
+            'default': dj_database_url.config(
+                default=database_url,
+                conn_max_age=600,
+                conn_health_checks=True,
+                ssl_require=True,
+            )
+        }
+        # Ensure PostgreSQL engine
+        DATABASES['default']['ENGINE'] = 'django.db.backends.postgresql'
+    else:
+        raise ValueError("DATABASE_URL or POSTGRES_URL environment variable is required")
 
-    DATABASES  = {
-                    'default':dj_database_url.config(default=env('POSTGRES_URL')),
-                                   
-                }
-    DATABASES['default']['ENGINE'] = 'django.db.backends.postgresql_psycopg2'
+# Cache configuration
+redis_url = os.environ.get('REDIS_PROD_HOST', 'redis://127.0.0.1:6379')
+redis_password = os.environ.get('REDIS_PASSWORD', '')
 
-
-
-CACHES = {
-    'default': {
-        'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': f"{env('REDIS_PROD_HOST')}/0" if not DEBUG else "redis://127.0.0.1:6379/0",
-        'OPTIONS': {
-            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-            'PASSWORD': env('REDIS_PASSWORD') if not DEBUG else ""
-        },
-        'TIMEOUT': 300,  # Set the cache timeout in seconds
+if IS_VERCEL and not redis_url.startswith('redis://'):
+    # Skip Redis cache on Vercel if not configured
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        }
     }
-}
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django_redis.cache.RedisCache',
+            'LOCATION': f"{redis_url}/0",
+            'OPTIONS': {
+                'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+                'PASSWORD': redis_password if redis_password else None
+            },
+            'TIMEOUT': 300,
+        }
+    }
 
 
 # Password validation
-# https://docs.djangoproject.com/en/4.0/ref/settings/#auth-password-validators
-
 AUTH_PASSWORD_VALIDATORS = [
-    {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
-    },
+    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
 ]
 
 
 # Internationalization
-# https://docs.djangoproject.com/en/4.0/topics/i18n/
-
 LANGUAGE_CODE = 'en-us'
-
 TIME_ZONE = 'UTC'
-
 USE_I18N = True
-
 USE_TZ = True
 
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/4.0/howto/static-files/
 
-STATICFILES_DIRS = [
-    BASE_DIR.joinpath("templates"),
-]
-
-
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR.joinpath('staticfiles', 'static')
+
 STATICFILES_DIRS = [
-                        BASE_DIR.joinpath('templates'),
-                        BASE_DIR.joinpath('templates', 'js'),
-                        BASE_DIR.joinpath('templates', 'css'),
-                        BASE_DIR.joinpath('templates', 'assets'),
-                    ]
+    BASE_DIR.joinpath('templates'),
+    BASE_DIR.joinpath('templates', 'js'),
+    BASE_DIR.joinpath('templates', 'css'),
+    BASE_DIR.joinpath('templates', 'assets'),
+]
+
+# WhiteNoise configuration for serving static files on Vercel
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+
+# WhiteNoise settings
+WHITENOISE_USE_FINDERS = True
+WHITENOISE_MANIFEST_STRICT = False
+WHITENOISE_ALLOW_ALL_ORIGINS = True
 
 
-# if not DEBUG:
-    # STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
-
-
+# Media files configuration
 MEDIA_ROOT = BASE_DIR.joinpath('media')
+MEDIA_URL = '/media/'
+MEDIA_DOMAIN = os.environ.get('DOMAIN', 'http://localhost:8000')
 
-if DEBUG:
-    MEDIA_URL = '/media/'
-    MEDIA_DOMAIN = 'http://localhost:8000'
-   
+# Google Cloud Storage for media files (production)
+if not DEBUG:
+    firebase_cred_path = os.environ.get('FIREBASE_CRED_PATH', '/tmp/firebase_cred.json')
+    bucket_name = os.environ.get('BUCKET_NAME', '')
+    project_id = os.environ.get('PROJECT_ID', '')
+    
+    if bucket_name and project_id and os.path.exists(firebase_cred_path):
+        try:
+            from google.oauth2 import service_account
+            
+            DEFAULT_FILE_STORAGE = "storages.backends.gcloud.GoogleCloudStorage"
+            GS_BUCKET_NAME = bucket_name
+            GS_PROJECT_ID = project_id
+            GS_CREDENTIALS = service_account.Credentials.from_service_account_file(firebase_cred_path)
+            GS_DEFAULT_ACL = "publicRead"
+            GS_QUERYSTRING_AUTH = True
+            GS_FILE_OVERWRITE = False
+        except Exception as e:
+            print(f"Warning: Could not configure Google Cloud Storage: {e}")
 
-    # DEFAULT_FILE_STORAGE = "storages.backends.gcloud.GoogleCloudStorage"
-    # GS_BUCKET_NAME = env("BUCKET_NAME")
-    # GS_PROJECT_ID = env("PROJECT_ID")
-    # GS_CREDENTIALS = service_account.Credentials.from_service_account_file(
-    #     BASE_DIR.joinpath(env("FIREBASE_CRED_PATH"))
-    # )
-    # GS_DEFAULT_ACL = "publicRead"  # Optional: Set ACL for public access
-    # GS_QUERYSTRING_AUTH = True  # Optional: Enable querystring authentication
-
-
-else:
-    MEDIA_URL = '/media/'
-
-    # Define the storage settings for media files
-    DEFAULT_FILE_STORAGE = "storages.backends.gcloud.GoogleCloudStorage"
-    GS_BUCKET_NAME = env("BUCKET_NAME")
-    GS_PROJECT_ID = env("PROJECT_ID")
-    GS_CREDENTIALS = service_account.Credentials.from_service_account_file(
-        BASE_DIR.joinpath(env("FIREBASE_CRED_PATH"))
-    )
-    GS_DEFAULT_ACL = "publicRead"  # Optional: Set ACL for public access
-    GS_QUERYSTRING_AUTH = True  # Optional: Enable querystring authentication
-    GS_FILE_OVERWRITE = False # prevent overwriting
 
 # Default primary key field type
-# https://docs.djangoproject.com/en/4.0/ref/settings/#default-auto-field
-
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
+# Logging configuration
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
@@ -355,48 +361,38 @@ LOGGING = {
     },
     'formatters': {
         'verbose': {
-            'format': '[contactor] %(levelname)s %(asctime)s %(message)s'
+            'format': '[email_automation] %(levelname)s %(asctime)s %(message)s'
         },
     },
     'handlers': {
-        # Send all messages to console
         'console': {
-            'level': 'DEBUG',
+            'level': 'DEBUG' if DEBUG else 'INFO',
             'class': 'logging.StreamHandler',
         },
-        
-        'celery': {
-            'level': 'DEBUG',
-            'class': 'logging.StreamHandler',
-        },
-
-        # Send info messages to syslog
-        # 'syslog':{
-        #     'level':'INFO',
-        #     'class': 'logging.handlers.SysLogHandler',
-        #     'facility': SysLogHandler.LOG_LOCAL2,
-        #     'address': '/dev/log',
-        #     'formatter': 'verbose',
-        # },
-        # Warning messages are sent to admin emails
-        'mail_admins': {
-            'level': 'WARNING',
-            'filters': ['require_debug_false'],
-            'class': 'django.utils.log.AdminEmailHandler',
-        },
-        # critical errors are logged to sentry
-        # 'sentry': {
-        #     'level': 'ERROR',
-        #     'filters': ['require_debug_false'],
-        #     'class': 'raven.contrib.django.handlers.SentryHandler',
-        # },
     },
     'loggers': {
-        # This is the "catch all" logger
         '': {
-            'handlers': ['console', 'mail_admins', 'celery'],
-            'level': 'DEBUG',
+            'handlers': ['console'],
+            'level': 'DEBUG' if DEBUG else 'INFO',
+            'propagate': False,
+        },
+        'django': {
+            'handlers': ['console'],
+            'level': 'INFO',
             'propagate': False,
         },
     }
 }
+
+# Security settings for production
+if not DEBUG:
+    SECURE_BROWSER_XSS_FILTER = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    X_FRAME_OPTIONS = 'DENY'
+    
+    # Only enable these if you have HTTPS (Vercel provides this)
+    if IS_VERCEL:
+        SECURE_SSL_REDIRECT = False  # Vercel handles SSL
+        SESSION_COOKIE_SECURE = True
+        CSRF_COOKIE_SECURE = True
+        SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')

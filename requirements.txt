@@ -15,6 +15,9 @@ dj-database-url==2.1.0
 
 whitenoise==6.6.0
 
+# python-dotenv for environment variable loading
+python-dotenv==1.0.0
+
 Jinja2==3.1.2
 
 firebase-admin==6.2.0
