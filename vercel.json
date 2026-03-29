@@ -1,31 +1,39 @@
-{ 
-    "git": {
-      "deploymentEnabled": {
-        "master": true
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "email_automation/wsgi.py",
+      "use": "@vercel/python",
+      "config": {
+        "maxLambdaSize": "50mb",
+        "runtime": "python3.11"
       }
     },
-    "builds": [
-        {
-            "src": "email_automation/wsgi.py",
-            "use": "@vercel/python",
-            "config": { "maxLambdaSize": "15mb", "runtime": "python3.8" }
-          },
-          {
-            "src": "build_file.sh",
-            "use": "@vercel/static-build",
-            "config": {
-              "distDir": "staticfiles"
-            }
-          }
-    ],
-    "routes": [
-        {
-            "src": "/static/(.*)",
-            "dest": "/static/$1"
-          },
-        {
-        "src": "/(.*)",
-        "dest": "email_automation/wsgi.py"
-        }
-    ]
+    {
+      "src": "staticfiles/static/**",
+      "use": "@vercel/static"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/static/(.*)",
+      "dest": "/staticfiles/static/$1"
+    },
+    {
+      "src": "/favicon.ico",
+      "dest": "/staticfiles/static/favicon.ico"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "email_automation/wsgi.py"
+    }
+  ],
+  "env": {
+    "DJANGO_SETTINGS_MODULE": "email_automation.settings"
+  },
+  "git": {
+    "deploymentEnabled": {
+      "master": true
+    }
+  }
 }
